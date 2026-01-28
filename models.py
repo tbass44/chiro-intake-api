@@ -4,8 +4,7 @@ models.py
 SQLAlchemy モデル定義
 """
 
-from sqlalchemy import Column, Integer, Text, DateTime
-from sqlalchemy.sql import func
+from sqlalchemy import Column, Integer, Text, DateTime, func
 from database import Base
 
 
