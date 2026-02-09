@@ -40,9 +40,32 @@ class AdminIntakeDetailResponse(BaseModel):
 
     ・raw: 保存された入力内容（dict）
     ・summary: 管理者向け summary
+    ・overview_text: 送信完了画面用・概要AI要約
+    ・line_detail_text: LINE送信用・詳細AI要約
     """
 
     id: int
     raw: dict
     summary: AdminIntakeSummary
+
+    # ★ ここを追加
+    overview_text: Optional[str] = None
+    line_detail_text: Optional[str] = None
+
     created_at: datetime
+
+class AdminIntakeListSummary(BaseModel):
+    """
+    管理画面・一覧表示用の最小 summary
+    """
+    red_flags: List[str] = []
+    clinical_focus: Optional[str] = None
+
+class AdminIntakeListItem(BaseModel):
+    """
+    /admin/intakes 用レスポンス（一覧）
+    """
+    id: int
+    created_at: Optional[datetime]
+    payload: dict
+    summary: AdminIntakeListSummary

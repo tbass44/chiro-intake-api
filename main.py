@@ -1,14 +1,28 @@
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
+import os
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 import json
+import secrets
 
 from database import engine, get_db, init_db
 from models import Intake
-from schemas import AdminIntakeDetailResponse
-from summary import build_admin_summary
+from schemas import AdminIntakeDetailResponse, AdminIntakeListItem, AdminIntakeListSummary
+from summary import (
+    build_admin_summary,
+    build_user_ai_input,
+    generate_overview_ai_text,
+    generate_line_detail_ai_text,
+)
+from services.line import send_line_detail_if_enabled
+from services.line_budget import can_send_line
+from services.line_sender import send_line_message
+from datetime import datetime, timezone
 
 import csv
 from io import StringIO
@@ -97,6 +111,7 @@ async def get_intakes():
     ・payload は JSON 文字列を dict に変換して返す
     ・created_at の降順で並べる（新しい順）
     ・レスポンスは JSON 配列で返す
+    ・一覧表示用の最小 summary（red_flags / clinical_focus）    
     """
     db: Session = next(get_db())
     try:
@@ -112,11 +127,22 @@ async def get_intakes():
             except json.JSONDecodeError:
                 # JSON パースエラーの場合は空の dict にする
                 payload_dict = {}
+
+            # 管理者向け summary を生成（既存ロジックを再利用）
+            full_summary = build_admin_summary(payload_dict)
+
+            # 一覧表示に必要な最小 summary だけを抜き出す
+            list_summary = {
+                "chief_complaints": full_summary.chief_complaints,
+                "red_flags": full_summary.red_flags,
+                "clinical_focus": full_summary.clinical_focus,
+            }
             
             result.append({
                 "id": intake.id,
                 "payload": payload_dict,
-                "created_at": intake.created_at.isoformat() if intake.created_at else None # type: ignore[attr-defined]
+                "created_at": intake.created_at.isoformat() if intake.created_at else None, # type: ignore[attr-defined]
+                "summary": list_summary,
             })
         
         # JSON 配列で返す
@@ -151,7 +177,7 @@ async def get_intake(id: int, db: Session = Depends(get_db)):
 
         # payload は JSON 文字列なので dict に変換
         try:
-            payload_dict = json.loads(intake.payload)  # type: ignore[attr-defined]
+            payload_dict = json.loads(intake.payload)
         except json.JSONDecodeError:
             payload_dict = {}
 
@@ -162,6 +188,8 @@ async def get_intake(id: int, db: Session = Depends(get_db)):
             "id": intake.id,
             "raw": payload_dict,
             "summary": summary,
+            "overview_text": intake.overview_text,
+            "line_detail_text": intake.line_detail_text,
             "created_at": intake.created_at,  # type: ignore[attr-defined]
         }
 
@@ -182,6 +210,7 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
     ・payload から summary を生成
     ・1行 = 1 intake
     ・Excel で開ける UTF-8 CSV
+    ・一覧用 summary を CSV 列として追加
     """
 
     try:
@@ -196,15 +225,19 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
         writer.writerow([
             "id",
             "created_at",
-            "main_complaints",
-            "symptom_duration",
-            "sleep_trouble",
-            "stress_level",
+            "name",
+            "chief_complaint",
+            # --- summary 追加 ---
+            "has_red_flags",
             "red_flags",
+            "clinical_focus",
+            "stress_level",
+            "sleep_trouble",
         ])
 
         for intake in intakes:
-            # payload は JSON 文字列 → dict
+            # payload は DB では「JSON文字列」
+            # → Python で扱いやすい dict に戻す
             try:
                 payload_dict = json.loads(intake.payload)  # type: ignore[attr-defined]
             except json.JSONDecodeError:
@@ -213,18 +246,29 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
             # summary を生成
             summary = build_admin_summary(payload_dict)
 
+            # --- 主訴の取得 ---
+            # symptoms[0].symptom を CSV 用に抜き出す
+            chief = ""
+            symptoms = payload_dict.get("symptoms", [])
+            if isinstance(symptoms, list) and symptoms:
+                chief = symptoms[0].get("symptom", "")
+
             # 1行分を書き込み
             writer.writerow([
                 intake.id,
                 intake.created_at.isoformat() if intake.created_at else "",  # type: ignore[attr-defined]
-                ",".join(summary.chief_complaints),
-                summary.symptom_duration or "",
-                summary.sleep_trouble,
+                payload_dict.get("name", ""),
+                chief,
+
+                # --- summary 展開 三項演算子 ---
+                "YES" if summary.red_flags else "NO",
+                " / ".join(summary.red_flags),
+                summary.clinical_focus or "",
                 summary.stress_level or "",
-                ",".join(summary.red_flags),
+                "YES" if summary.sleep_trouble else "NO",
             ])
 
-        # CSV をレスポンスとして返す
+        # --- CSV を HTTP レスポンスとして返す ---
         output.seek(0)
         return StreamingResponse(
             output,
@@ -240,3 +284,189 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
 
     finally:
         db.close()
+
+# ============================================================
+# ユーザー向けAI要約用の「材料」を返す API
+# ============================================================
+from summary import build_user_ai_input
+
+
+@app.get("/api/intake/{id}/user-summary")
+async def get_user_summary_material(
+    id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    【このエンドポイントの役割】
+
+    ・指定された intake ID の入力内容を取得
+    ・管理者向け summary を生成（判断）
+    ・ユーザー向けAI要約の材料を作成
+    ・概要AI要約 / LINE詳細AI要約 を生成
+    ・DBに保存
+    ・概要だけを返す（送信完了画面用）
+    """    
+
+    try:
+        # ----------------------------------------
+        # ① DB から intake を取得
+        # ----------------------------------------
+        intake = db.query(Intake).filter(Intake.id == id).first()
+        if intake is None:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        # ----------------------------------------
+        # ② payload（JSON文字列）を dict に戻す
+        # ----------------------------------------
+        try:
+            payload_dict = json.loads(intake.payload)
+        except json.JSONDecodeError:
+            payload_dict = {}
+
+        # ----------------------------------------
+        # ③ 管理者向け summary を生成
+        # ----------------------------------------
+        admin_summary = build_admin_summary(payload_dict)
+
+        # ----------------------------------------
+        # ④ ユーザー向けAI要約の材料を生成
+        # ----------------------------------------
+        user_ai_input = build_user_ai_input(admin_summary)
+
+        # ----------------------------------------
+        # ⑤ AI要約を生成（上限ガード付き）
+        # ----------------------------------------
+        overview_text = generate_overview_ai_text(user_ai_input)
+        line_detail_text = generate_line_detail_ai_text(user_ai_input)
+
+        # ----------------------------------------
+        # LINE連携トークンを発行
+        # ----------------------------------------
+        if not intake.line_link_token:
+            intake.line_link_token = secrets.token_urlsafe(16)
+
+        # ----------------------------------------
+        # ⑥ DB に保存
+        # ----------------------------------------
+        intake.overview_text = overview_text
+        intake.line_detail_text = line_detail_text
+        db.commit()
+
+        # ----------------------------------------
+        # ⑥.5 LINE送信（スイッチ付き）
+        # ----------------------------------------
+        send_line_detail_if_enabled(
+            intake_id=intake.id,
+            line_detail_text=line_detail_text,
+        )
+
+        # ----------------------------------------
+        # ⑦ 概要だけ返す（完了画面用）
+        # ----------------------------------------
+        return {
+            "overview": overview_text,
+            "line_link_token": intake.line_link_token,  # ← フロントで使う
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/webhook/line")
+async def line_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    LINE Webhook（受信専用・DRY RUN）
+
+    期待：
+    - 友だち追加 or 最初のメッセージ
+    - text に 'link=xxxxx' が含まれる
+    """
+    raw_body = await request.body()
+
+    # 🔹 LINE Verify 用（bodyが空）
+    if not raw_body:
+        return {"status": "ok"}
+
+    # 🔹 ここから通常処理
+    payload = await request.json()
+
+    # ↓ ここから先で JSON parse & 本処理
+
+    try:
+        print("[LINE] webhook received")
+        print(payload)
+
+        events = payload.get("events", [])
+        if not events:
+            return {"status": "ok"}
+
+        event = events[0]
+        source = event.get("source", {})
+        line_user_id = source.get("userId")
+
+        message = event.get("message", {})
+        text = message.get("text", "")
+
+        # link=TOKEN を抜き出す
+        token = None
+        if "link=" in text:
+            token = text.split("link=", 1)[1].strip()
+
+        if not token:
+            print("[LINE] no token")
+            return {"status": "ok"}
+
+        intake = db.query(Intake).filter(Intake.line_link_token == token).first()
+        if not intake:
+            print("[LINE] token not found")
+            return {"status": "ok"}
+
+        # すでに送信済みなら何もしない
+        if intake.line_sent_at:
+            print("[LINE] already sent")
+            return {"status": "ok"}
+
+
+        # --- ここからが「実送信切替」 ---
+
+        # ① 送信スイッチ
+        if os.getenv("LINE_SEND_ENABLED", "false").lower() != "true":
+            print("[LINE] send disabled by env")
+            return {"status": "ok"}
+
+        now = datetime.now(timezone.utc)
+
+        # ② 予算ガード
+        if not can_send_line(now):
+            print("[LINE] budget exceeded")
+            return {"status": "ok"}
+
+        # ③ 実送信
+        send_line_message(
+            line_user_id=line_user_id,
+            text=intake.line_detail_text or "",
+        )
+
+        # ④ 送信成功したら確定
+        intake.line_user_id = line_user_id
+        intake.line_sent_at = now
+        db.commit()
+
+        print("===================================")
+        print("[LINE] SENT")
+        print(f"intake_id: {intake.id}")
+        print(f"line_user_id: {line_user_id}")
+        print("===================================")
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        # 失敗時は commit しない（＝再送されない安全設計）
+        print(f"[LINE] webhook error: {e}")
+        return {"status": "ok"}
