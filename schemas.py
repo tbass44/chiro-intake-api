@@ -48,9 +48,11 @@ class AdminIntakeDetailResponse(BaseModel):
     raw: dict
     summary: AdminIntakeSummary
 
-    # ★ ここを追加
     overview_text: Optional[str] = None
     line_detail_text: Optional[str] = None
+
+    line_status: str
+    line_sent_at: Optional[datetime] = None
 
     created_at: datetime
 

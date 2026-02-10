@@ -21,7 +21,7 @@ from summary import (
 )
 from services.line import send_line_detail_if_enabled
 from services.line_budget import can_send_line
-from services.line_sender import send_line_message
+from services.line_sender import send_line_message, send_line_initial_reply
 from datetime import datetime, timezone
 
 import csv
@@ -79,7 +79,10 @@ async def receive_intake(request: Request):
         # 正常レスポンス
         return JSONResponse(
             status_code=200,
-            content={"status": "ok"}
+            content={
+                "status": "ok",
+                "intake_id": intake.id,
+            }
         )
         
     except json.JSONDecodeError:
@@ -137,12 +140,15 @@ async def get_intakes():
                 "red_flags": full_summary.red_flags,
                 "clinical_focus": full_summary.clinical_focus,
             }
+
+            line_status = "連携済" if intake.line_user_id else "未連携"
             
             result.append({
                 "id": intake.id,
                 "payload": payload_dict,
                 "created_at": intake.created_at.isoformat() if intake.created_at else None, # type: ignore[attr-defined]
                 "summary": list_summary,
+                "line_status": line_status,
             })
         
         # JSON 配列で返す
@@ -184,6 +190,8 @@ async def get_intake(id: int, db: Session = Depends(get_db)):
         # 管理者向け summary を生成
         summary = build_admin_summary(payload_dict)
 
+        line_status = "連携済" if intake.line_user_id else "未連携"
+
         return {
             "id": intake.id,
             "raw": payload_dict,
@@ -191,6 +199,8 @@ async def get_intake(id: int, db: Session = Depends(get_db)):
             "overview_text": intake.overview_text,
             "line_detail_text": intake.line_detail_text,
             "created_at": intake.created_at,  # type: ignore[attr-defined]
+            "line_status": line_status,
+            "line_sent_at": intake.line_sent_at,
         }
 
     except HTTPException:
@@ -226,8 +236,8 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
             "id",
             "created_at",
             "name",
-            "chief_complaint",
-            # --- summary 追加 ---
+            "chief_complaint",      
+            "line_status",      
             "has_red_flags",
             "red_flags",
             "clinical_focus",
@@ -253,12 +263,15 @@ async def export_intakes_csv(db: Session = Depends(get_db)):
             if isinstance(symptoms, list) and symptoms:
                 chief = symptoms[0].get("symptom", "")
 
+            line_status = "連携済" if intake.line_user_id else "未連携"
+
             # 1行分を書き込み
             writer.writerow([
                 intake.id,
                 intake.created_at.isoformat() if intake.created_at else "",  # type: ignore[attr-defined]
                 payload_dict.get("name", ""),
                 chief,
+                line_status,
 
                 # --- summary 展開 三項演算子 ---
                 "YES" if summary.red_flags else "NO",
@@ -448,6 +461,12 @@ async def line_webhook(
             return {"status": "ok"}
 
         # ③ 実送信
+        # ③-1 初回自動返信（固定文）
+        send_line_initial_reply(
+            line_user_id=line_user_id,
+        )
+
+        # ③-2 AI要約（詳細）
         send_line_message(
             line_user_id=line_user_id,
             text=intake.line_detail_text or "",
@@ -470,3 +489,45 @@ async def line_webhook(
         # 失敗時は commit しない（＝再送されない安全設計）
         print(f"[LINE] webhook error: {e}")
         return {"status": "ok"}
+
+# 再送エンドポイント
+@app.post("/admin/intakes/{id}/resend-line")
+async def resend_line_message(
+    id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    管理者用：LINE再送信
+    ・未連携の intake のみ対象
+    ・既存の送信ガードをすべて適用
+    """
+
+    intake = db.query(Intake).filter(Intake.id == id).first()
+    if intake is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # すでに連携済みなら送らない
+    if intake.line_user_id:
+        return {"status": "already_linked"}
+
+    if not intake.line_link_token:
+        return {"status": "no_link_token"}
+
+    # --- 送信スイッチ ---
+    if os.getenv("LINE_SEND_ENABLED", "false").lower() != "true":
+        return {"status": "send_disabled"}
+
+    now = datetime.now(timezone.utc)
+
+    # --- 予算ガード ---
+    if not can_send_line(now):
+        return {"status": "budget_exceeded"}
+
+    # ❗ userId が無いので「送信」はできない
+    # 👉 ここでは「再案内メッセージ」を送る設計にする
+    # （link=xxxx を再度送ってもらう用）
+
+    return {
+        "status": "need_user_action",
+        "message": "LINEで link=XXXX を再送してもらってください"
+    }
