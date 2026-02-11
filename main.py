@@ -33,15 +33,21 @@ app = FastAPI()
 # データベースとテーブルを作成
 init_db()
 
+# CORS 設定（本番 + ローカル対応）
+origins = [
+    "https://hearing.chiroshiga.com",
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
+
 # CORS 設定（Next.js localhost からのリクエストを許可）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.post("/api/intake")
 async def receive_intake(request: Request):
