@@ -504,7 +504,7 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.3,
+        "temperature": 0.1,
     }
 
     try:
@@ -662,43 +662,38 @@ def generate_user_summary_from_payload(payload: dict) -> str:
     ・失敗時はルールベースへフォールバック
     """
 
+    # 🔽 ここで必要情報だけ抽出する
+    safe_input = {
+        "main_complaints": payload.get("main_complaints"),
+        "body_areas": payload.get("body_areas"),
+        "context_factors": payload.get("context_factors"),
+    }
+
     system_prompt = """
 あなたは整体院のサポートAIです。
 
-医療診断は行わず、
-断定的な表現や不安を煽る表現は使いません。
-
-目的は、
-・現在の状態を整理すること
-・考えられる体のバランスの傾向をやわらかく伝えること
-・来院時に確認すべきポイントを提示すること
-
-構成は必ず以下の順にしてください：
-
-① 現在の状態の整理
-② 体のバランスとして考えられる可能性
-③ 来院時に確認・調整していくポイント
-
-500〜700字程度。
-自然でやさしい日本語にしてください。
+絶対ルール：
+・入力データに含まれていない情報を推測しない
+・個人情報は出力しない
+・医療診断をしない
+・断定しない
+・250〜350字
 """
 
     user_prompt = f"""
-【入力された内容】
-{json.dumps(payload, ensure_ascii=False, indent=2)}
+【入力情報】
+{json.dumps(safe_input, ensure_ascii=False)}
 
-上記情報をもとに、
-整体院でのヒアリング前の整理サマリーを作成してください。
+整理サマリーを作成してください。
 """
 
     text = call_llm(system_prompt, user_prompt)
 
-    # フォールバック（最低限成立する形）
     if not isinstance(text, str) or len(text) < 200:
         return (
             "ご入力内容を確認しました。\n"
             "現在のお身体の状態について、いくつかのつらさが重なっている可能性があります。\n"
-            "実際の状態を確認しながら、無理のない形で整理していきます。"
+            "来院時に状態を確認しながら整理していきます。"
         )
 
     return text
@@ -718,32 +713,41 @@ def generate_line_detail_ai_text_from_payload(payload: dict) -> str:
     ・最後に注意書きを必ず入れる
     """
 
+    safe_input = {
+        "main_complaints": payload.get("main_complaints"),
+        "body_areas": payload.get("body_areas"),
+        "context_factors": payload.get("context_factors"),
+        "attention_points": payload.get("attention_points"),
+    }
+
     system_prompt = """
-あなたは医療判断を行わない文章整理アシスタントです。
-入力情報をもとに、状態の見方をやさしく整理します。
-診断・原因断定・改善予測は禁止です。
-不安を煽る表現や専門用語は避けてください。
+あなたは医療判断をしない整理AIです。
+
+ルール：
+・個人情報を出さない
+・断定しない
+・400〜600字
+・最後に必ず注意書きを入れる
 """
 
     user_prompt = f"""
-【入力された内容】
-{json.dumps(payload, ensure_ascii=False, indent=2)}
+【入力情報】
+{json.dumps(safe_input, ensure_ascii=False)}
 
-【出力条件（必ず守る）】
-・400〜700字
-・2〜4段落で構成
-・入力内容を「整理 → 可能性 → 来院時に確認するポイント」でまとめる
-・睡眠や日常負担などは「可能性」「考えられる視点」で述べる（断定禁止）
-・断定語（原因は／治る／診断／異常）は使わない
-・最後に次の一文を必ず入れる：
-  「※これは医療的な診断ではなく、来院時に状態を確認しながら整理していきます。」
+整理 → 可能性 → 来院時確認 の順でまとめてください。
+
+最後に必ず以下を入れる：
+※これは医療的な診断ではなく、来院時に状態を確認しながら整理していきます。
 """
 
     text = call_llm(system_prompt, user_prompt)
 
-    # フォールバック（詳細として成立させる）
     if not isinstance(text, str) or len(text) < 300:
-        return _dummy_line_detail_text(build_user_ai_input(build_admin_summary(payload)))
+        return (
+            "ご入力内容を確認しました。\n\n"
+            "現在のつらさについては複数の要素が重なっている可能性があります。\n"
+            "来院時に詳しく確認しながら整理していきます。\n\n"
+            "※これは医療的な診断ではなく、来院時に状態を確認しながら整理していきます。"
+        )
 
     return text
-
