@@ -512,7 +512,7 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
             url,
             headers=headers,
             json=payload,
-            timeout=10,
+            timeout=30,
         )
         response.raise_for_status()
 
