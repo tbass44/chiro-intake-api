@@ -18,6 +18,8 @@ from summary import (
     build_user_ai_input,
     generate_overview_ai_text,
     generate_line_detail_ai_text,
+    generate_user_summary_from_payload,
+    generate_line_detail_ai_text_from_payload,
 )
 from services.line import send_line_detail_if_enabled
 from services.line_budget import can_send_line
@@ -355,8 +357,8 @@ async def get_user_summary_material(
         # ----------------------------------------
         # ⑤ AI要約を生成（上限ガード付き）
         # ----------------------------------------
-        overview_text = generate_overview_ai_text(user_ai_input)
-        line_detail_text = generate_line_detail_ai_text(user_ai_input)
+        overview_text = generate_user_summary_from_payload(payload_dict)
+        line_detail_text = generate_line_detail_ai_text_from_payload(payload_dict)
 
         # ----------------------------------------
         # LINE連携トークンを発行
