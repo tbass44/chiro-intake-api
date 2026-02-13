@@ -354,6 +354,10 @@ async def get_user_summary_material(
         # ----------------------------------------
         user_ai_input = build_user_ai_input(admin_summary)
 
+        print("=== user_ai_input ===")
+        print(json.dumps(user_ai_input, ensure_ascii=False, indent=2))
+        print("=====================")
+
         # ----------------------------------------
         # ⑤ AI要約を生成（上限ガード付き）
         # ----------------------------------------
