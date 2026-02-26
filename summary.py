@@ -669,6 +669,9 @@ def generate_user_summary_from_payload(payload: dict) -> str:
         "context_factors": payload.get("context_factors"),
     }
 
+    print("=== payload keys ===", list(payload.keys()))
+    print("=== safe_input ===", json.dumps(safe_input, ensure_ascii=False))
+
     system_prompt = """
     あなたは整体院のサポートAIです。
 
