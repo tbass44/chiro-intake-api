@@ -662,15 +662,11 @@ def generate_user_summary_from_payload(payload: dict) -> str:
     ・失敗時はルールベースへフォールバック
     """
 
-    # 🔽 ここで必要情報だけ抽出する
-    safe_input = {
-        "main_complaints": payload.get("main_complaints"),
-        "body_areas": payload.get("body_areas"),
-        "context_factors": payload.get("context_factors"),
-    }
+    admin_summary = build_admin_summary(payload)
+    user_ai_input = build_user_ai_input(admin_summary)
 
-    print("=== payload keys ===", list(payload.keys()))
-    print("=== safe_input ===", json.dumps(safe_input, ensure_ascii=False))
+    print("=== user_ai_input ===")
+    print(json.dumps(user_ai_input, ensure_ascii=False, indent=2))
 
     system_prompt = """
     あなたは整体院のサポートAIです。
@@ -697,7 +693,7 @@ def generate_user_summary_from_payload(payload: dict) -> str:
 
     user_prompt = f"""
     【入力情報】
-    {json.dumps(safe_input, ensure_ascii=False)}
+    {json.dumps(user_ai_input, ensure_ascii=False)}
 
     整理サマリーを作成してください。
     """
