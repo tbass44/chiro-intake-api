@@ -724,12 +724,11 @@ def generate_line_detail_ai_text_from_payload(payload: dict) -> str:
     ・最後に注意書きを必ず入れる
     """
 
-    safe_input = {
-        "main_complaints": payload.get("main_complaints"),
-        "body_areas": payload.get("body_areas"),
-        "context_factors": payload.get("context_factors"),
-        "attention_points": payload.get("attention_points"),
-    }
+    admin_summary = build_admin_summary(payload)
+    user_ai_input = build_user_ai_input(admin_summary)
+
+    print("=== line_user_ai_input ===")
+    print(json.dumps(user_ai_input, ensure_ascii=False, indent=2))
 
     system_prompt = """
     あなたは医療判断をしない整体院の文章整理アシスタントです。
@@ -759,7 +758,7 @@ def generate_line_detail_ai_text_from_payload(payload: dict) -> str:
 
     user_prompt = f"""
     【入力情報】
-    {json.dumps(safe_input, ensure_ascii=False)}
+    {json.dumps(user_ai_input, ensure_ascii=False)}
 
     整理 → 可能性 → 来院時確認 の順でまとめてください。
 
