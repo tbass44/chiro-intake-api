@@ -680,6 +680,8 @@ def generate_user_summary_from_payload(payload: dict) -> str:
     ・医療診断をしない
     ・原因を断定しない
     ・改善を約束しない
+    ・整体の効果を直接的にアピールしすぎない
+    ・精神疾患に対する断定的表現を避ける
 
     【表現方針】
     ・やさしく自然な日本語
@@ -741,6 +743,8 @@ def generate_line_detail_ai_text_from_payload(payload: dict) -> str:
     ・個人情報を出力しない
     ・診断・原因断定・改善予測は禁止
     ・不安を煽らない
+    ・整体の効果を直接的にアピールしすぎない
+    ・精神疾患に対する断定的表現を避ける
 
     【構成】
     1. 現在の状態の整理
